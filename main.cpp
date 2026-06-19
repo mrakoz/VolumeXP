@@ -32,11 +32,14 @@
 #define IDC_DAY_FRI 1018
 #define IDC_DAY_SAT 1019
 #define IDC_DAY_SUN 1020
+#define IDC_ALLDAY 1021
+#define IDC_FORCERUN 1022
+#define IDC_CURVOL 1023
 
 #define WM_TRAYICON (WM_USER + 1)
 
 HINSTANCE hInst;
-HWND hWndMain, hListView, hTimeFrom, hTimeTo, hVolume, hDefVol, hTimeLabel;
+HWND hWndMain, hListView, hTimeFrom, hTimeTo, hVolume, hDefVol, hTimeLabel, hCurVolLabel, hAllDay;
 HWND hAutoStart, hStartMinimized;
 HWND hDaysCB[7];
 NOTIFYICONDATAW nid;
@@ -63,6 +66,41 @@ void LogEvent(const wchar_t* message) {
 BOOL CALLBACK EnumChildProc(HWND child, LPARAM font) {
     SendMessageW(child, WM_SETFONT, font, TRUE);
     return TRUE;
+}
+
+int GetSysVolume() {
+    int vol = 0;
+    HMIXER hMixer;
+    if (mixerOpen(&hMixer, 0, 0, 0, 0) == MMSYSERR_NOERROR) {
+        MIXERLINEW ml = {0};
+        ml.cbStruct = sizeof(MIXERLINEW);
+        ml.dwComponentType = MIXERLINE_COMPONENTTYPE_DST_SPEAKERS;
+        if (mixerGetLineInfoW((HMIXEROBJ)hMixer, &ml, MIXER_GETLINEINFOF_COMPONENTTYPE) == MMSYSERR_NOERROR) {
+            MIXERLINECONTROLSW mlc = {0};
+            MIXERCONTROLW mc = {0};
+            mlc.cbStruct = sizeof(MIXERLINECONTROLSW);
+            mlc.dwLineID = ml.dwLineID;
+            mlc.dwControlType = MIXERCONTROL_CONTROLTYPE_VOLUME;
+            mlc.cControls = 1;
+            mlc.cbmxctrl = sizeof(MIXERCONTROLW);
+            mlc.pamxctrl = &mc;
+            if (mixerGetLineControlsW((HMIXEROBJ)hMixer, &mlc, MIXER_GETLINECONTROLSF_ONEBYTYPE) == MMSYSERR_NOERROR) {
+                MIXERCONTROLDETAILS mcd = {0};
+                MIXERCONTROLDETAILS_UNSIGNED mcdu = {0};
+                mcd.cbStruct = sizeof(MIXERCONTROLDETAILS);
+                mcd.dwControlID = mc.dwControlID;
+                mcd.cChannels = 1;
+                mcd.cMultipleItems = 0;
+                mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
+                mcd.paDetails = &mcdu;
+                if (mixerGetControlDetailsW((HMIXEROBJ)hMixer, &mcd, MIXER_GETCONTROLDETAILSF_VALUE) == MMSYSERR_NOERROR) {
+                    vol = (int)((mcdu.dwValue * 100) / 65535);
+                }
+            }
+        }
+        mixerClose(hMixer);
+    }
+    return vol;
 }
 
 void SetSysVolume(int vol) {
@@ -99,11 +137,13 @@ void SetSysVolume(int vol) {
     }
 }
 
-void CheckSchedule() {
+void ApplyCurrentSchedule(bool force) {
     SYSTEMTIME st;
     GetLocalTime(&st);
-    if (st.wMinute == iLastMin) return;
-    iLastMin = st.wMinute;
+    if (!force) {
+        if (st.wMinute == iLastMin) return;
+        iLastMin = st.wMinute;
+    }
     
     int currentDay = st.wDayOfWeek; 
     if (currentDay == 0) currentDay = 6; else currentDay -= 1; // 0=Mon..6=Sun
@@ -127,27 +167,45 @@ void CheckSchedule() {
         if (wcsstr(sDays, daysStr[currentDay]) != NULL) dayMatch = true;
 
         if (dayMatch) {
-            if (wcscmp(currentTime, sFrom) == 0) {
-                targetVol = _wtoi(sVol);
-                wcscpy(scheduleDays, sDays);
-                break;
-            } else if (wcscmp(currentTime, sTo) == 0) {
-                wchar_t defVolStr[10];
-                GetWindowTextW(hDefVol, defVolStr, 10);
-                targetVol = _wtoi(defVolStr);
-                isDefault = true;
-                wcscpy(scheduleDays, sDays);
-                break;
+            if (force) {
+                if (wcscmp(currentTime, sFrom) >= 0 && (wcscmp(sTo, L"--:--") == 0 || wcscmp(currentTime, sTo) < 0)) {
+                    targetVol = _wtoi(sVol);
+                    wcscpy(scheduleDays, sDays);
+                    break;
+                }
+            } else {
+                if (wcscmp(currentTime, sFrom) == 0) {
+                    targetVol = _wtoi(sVol);
+                    wcscpy(scheduleDays, sDays);
+                    break;
+                } else if (wcscmp(currentTime, sTo) == 0) {
+                    wchar_t defVolStr[10];
+                    GetWindowTextW(hDefVol, defVolStr, 10);
+                    targetVol = _wtoi(defVolStr);
+                    isDefault = true;
+                    wcscpy(scheduleDays, sDays);
+                    break;
+                }
             }
         }
     }
+    
+    if (force && targetVol == -1) {
+        wchar_t defVolStr[10];
+        GetWindowTextW(hDefVol, defVolStr, 10);
+        targetVol = _wtoi(defVolStr);
+        isDefault = true;
+    }
+
     if (targetVol != -1) {
         SetSysVolume(targetVol);
         wchar_t logMsg[200];
-        if (isDefault) {
-            swprintf(logMsg, 200, L"Громкость возвращена по умолчанию на %d%% (Конец правила: %ls)", targetVol, scheduleDays);
+        if (force) {
+            if (isDefault) swprintf(logMsg, 200, L"Принудительно возвращена громкость по умолчанию: %d%%", targetVol);
+            else swprintf(logMsg, 200, L"Принудительно установлена громкость %d%% по расписанию \"%ls\"", targetVol, scheduleDays);
         } else {
-            swprintf(logMsg, 200, L"Громкость изменена на %d%% по расписанию \"%ls\"", targetVol, scheduleDays);
+            if (isDefault) swprintf(logMsg, 200, L"Громкость возвращена по умолчанию на %d%% (Конец правила: %ls)", targetVol, scheduleDays);
+            else swprintf(logMsg, 200, L"Громкость изменена на %d%% по расписанию \"%ls\"", targetVol, scheduleDays);
         }
         LogEvent(logMsg);
     }
@@ -156,6 +214,12 @@ void CheckSchedule() {
 void UpdateClock() {
     SYSTEMTIME st;
     GetLocalTime(&st);
+    
+    int curVol = GetSysVolume();
+    wchar_t volBuf[50];
+    swprintf(volBuf, 50, L"Текущая громкость: %d%%", curVol);
+    SetWindowTextW(hCurVolLabel, volBuf);
+
     if (st.wSecond == iLastSec) return;
     iLastSec = st.wSecond;
 
@@ -188,6 +252,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 wchar_t minStr[10]; swprintf(minStr, 10, L"%d", minVal);
                 WritePrivateProfileStringW(L"Settings", L"StartMinimized", minStr, szIniFile);
                 return 0;
+            } else if (LOWORD(wParam) == IDC_ALLDAY && HIWORD(wParam) == BN_CLICKED) {
+                bool isChecked = (SendMessage(hAllDay, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                EnableWindow(hTimeFrom, !isChecked);
+                EnableWindow(hTimeTo, !isChecked);
+                return 0;
+            } else if (LOWORD(wParam) == IDC_FORCERUN) {
+                ApplyCurrentSchedule(true);
+                return 0;
             } else if (LOWORD(wParam) == IDC_HIDE) {
                 nid.cbSize = sizeof(NOTIFYICONDATAW);
                 nid.hWnd = hwnd;
@@ -215,21 +287,27 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 }
 
                 wchar_t from[10], to[10], vol[10];
-                GetWindowTextW(hTimeFrom, from, 10);
-                GetWindowTextW(hTimeTo, to, 10);
                 GetWindowTextW(hVolume, vol, 10);
                 
-                int hF, mF, hT, mT;
-                if (swscanf(from, L"%d:%d", &hF, &mF) != 2 || hF < 0 || hF > 23 || mF < 0 || mF > 59) {
-                    MessageBoxW(hwnd, L"Неверный формат времени 'С' (используйте ЧЧ:ММ, 00-23:00-59).", L"Ошибка ввода", MB_ICONERROR);
-                    return 0;
+                bool allDay = (SendMessage(hAllDay, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                if (allDay) {
+                    wcscpy(from, L"00:00");
+                    wcscpy(to, L"--:--");
+                } else {
+                    GetWindowTextW(hTimeFrom, from, 10);
+                    GetWindowTextW(hTimeTo, to, 10);
+                    int hF, mF, hT, mT;
+                    if (swscanf(from, L"%d:%d", &hF, &mF) != 2 || hF < 0 || hF > 23 || mF < 0 || mF > 59) {
+                        MessageBoxW(hwnd, L"Неверный формат времени 'С' (используйте ЧЧ:ММ, 00-23:00-59).", L"Ошибка ввода", MB_ICONERROR);
+                        return 0;
+                    }
+                    if (swscanf(to, L"%d:%d", &hT, &mT) != 2 || hT < 0 || hT > 23 || mT < 0 || mT > 59) {
+                        MessageBoxW(hwnd, L"Неверный формат времени 'По' (используйте ЧЧ:ММ, 00-23:00-59).", L"Ошибка ввода", MB_ICONERROR);
+                        return 0;
+                    }
+                    swprintf(from, 10, L"%02d:%02d", hF, mF);
+                    swprintf(to, 10, L"%02d:%02d", hT, mT);
                 }
-                if (swscanf(to, L"%d:%d", &hT, &mT) != 2 || hT < 0 || hT > 23 || mT < 0 || mT > 59) {
-                    MessageBoxW(hwnd, L"Неверный формат времени 'По' (используйте ЧЧ:ММ, 00-23:00-59).", L"Ошибка ввода", MB_ICONERROR);
-                    return 0;
-                }
-                swprintf(from, 10, L"%02d:%02d", hF, mF);
-                swprintf(to, 10, L"%02d:%02d", hT, mT);
 
                 int count = ListView_GetItemCount(hListView);
                 for (int i = 0; i < count; i++) {
@@ -247,7 +325,20 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                     }
                     
                     if (dayOverlap) {
-                        if (wcscmp(from, eTo) < 0 && wcscmp(to, eFrom) > 0) {
+                        bool overlap = false;
+                        bool eInfinity = (wcscmp(eTo, L"--:--") == 0);
+                        bool newInfinity = (wcscmp(to, L"--:--") == 0);
+
+                        if (newInfinity && eInfinity) overlap = true;
+                        else if (newInfinity) {
+                            if (wcscmp(from, eTo) < 0) overlap = true; 
+                        } else if (eInfinity) {
+                            if (wcscmp(to, eFrom) > 0) overlap = true; 
+                        } else {
+                            if (wcscmp(from, eTo) < 0 && wcscmp(to, eFrom) > 0) overlap = true;
+                        }
+
+                        if (overlap) {
                             MessageBoxW(hwnd, L"Этот интервал пересекается с уже существующим правилом!", L"Ошибка", MB_ICONERROR);
                             return 0;
                         }
@@ -296,7 +387,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             }
             if (hIni != INVALID_HANDLE_VALUE) CloseHandle(hIni);
 
-            hListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 10, 10, 410, 120, hwnd, (HMENU)IDC_LISTVIEW, hInst, NULL);
+            hListView = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, 10, 10, 420, 120, hwnd, (HMENU)IDC_LISTVIEW, hInst, NULL);
             ListView_SetExtendedListViewStyle(hListView, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
             LVCOLUMNW lvc = {0}; lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
             lvc.cx = 140; lvc.pszText = (LPWSTR)L"Дни"; ListView_InsertColumn(hListView, 0, &lvc);
@@ -312,12 +403,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hTimeFrom = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"09:00", WS_CHILD | WS_VISIBLE, 30, 170, 50, 22, hwnd, (HMENU)IDC_TIMEFROM, hInst, NULL);
             CreateWindowExW(0, L"STATIC", L"По:", WS_CHILD | WS_VISIBLE, 90, 173, 25, 20, hwnd, NULL, hInst, NULL);
             hTimeTo = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"18:00", WS_CHILD | WS_VISIBLE, 115, 170, 50, 22, hwnd, (HMENU)IDC_TIMETO, hInst, NULL);
-            CreateWindowExW(0, L"STATIC", L"Громкость:", WS_CHILD | WS_VISIBLE, 180, 173, 70, 20, hwnd, NULL, hInst, NULL);
-            hVolume = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"50", WS_CHILD | WS_VISIBLE | ES_NUMBER, 255, 170, 30, 22, hwnd, (HMENU)IDC_VOLUME, hInst, NULL);
+            
+            hAllDay = CreateWindowExW(0, L"BUTTON", L"Весь день", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 180, 170, 90, 20, hwnd, (HMENU)IDC_ALLDAY, hInst, NULL);
+            
+            CreateWindowExW(0, L"STATIC", L"Громкость:", WS_CHILD | WS_VISIBLE, 280, 173, 70, 20, hwnd, NULL, hInst, NULL);
+            hVolume = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"50", WS_CHILD | WS_VISIBLE | ES_NUMBER, 350, 170, 40, 22, hwnd, (HMENU)IDC_VOLUME, hInst, NULL);
 
-            CreateWindowExW(0, L"BUTTON", L"Добавить", WS_CHILD | WS_VISIBLE, 10, 210, 120, 30, hwnd, (HMENU)IDC_ADD, hInst, NULL);
-            CreateWindowExW(0, L"BUTTON", L"Сохранить", WS_CHILD | WS_VISIBLE, 140, 210, 120, 30, hwnd, (HMENU)IDC_SAVE, hInst, NULL);
-            CreateWindowExW(0, L"BUTTON", L"Удалить", WS_CHILD | WS_VISIBLE, 270, 210, 120, 30, hwnd, (HMENU)IDC_DELETE, hInst, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Добавить", WS_CHILD | WS_VISIBLE, 10, 210, 90, 30, hwnd, (HMENU)IDC_ADD, hInst, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Сохранить", WS_CHILD | WS_VISIBLE, 110, 210, 90, 30, hwnd, (HMENU)IDC_SAVE, hInst, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Удалить", WS_CHILD | WS_VISIBLE, 210, 210, 90, 30, hwnd, (HMENU)IDC_DELETE, hInst, NULL);
+            CreateWindowExW(0, L"BUTTON", L"Применить", WS_CHILD | WS_VISIBLE, 310, 210, 110, 30, hwnd, (HMENU)IDC_FORCERUN, hInst, NULL);
 
             CreateWindowExW(0, L"STATIC", L"Громкость по умолчанию:", WS_CHILD | WS_VISIBLE, 10, 263, 170, 20, hwnd, NULL, hInst, NULL);
             hDefVol = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"100", WS_CHILD | WS_VISIBLE | ES_NUMBER, 180, 260, 50, 22, hwnd, (HMENU)IDC_DEFVOL, hInst, NULL);
@@ -325,9 +420,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             hAutoStart = CreateWindowExW(0, L"BUTTON", L"Запуск с Windows", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 250, 250, 150, 20, hwnd, (HMENU)IDC_AUTOSTART, hInst, NULL);
             hStartMinimized = CreateWindowExW(0, L"BUTTON", L"Запуск свернутым", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 250, 270, 150, 20, hwnd, (HMENU)IDC_STARTMINIMIZED, hInst, NULL);
 
-            
             CreateWindowExW(0, L"BUTTON", L"Скрыть в трей", WS_CHILD | WS_VISIBLE, 10, 300, 120, 30, hwnd, (HMENU)IDC_HIDE, hInst, NULL);
-            hTimeLabel = CreateWindowExW(0, L"STATIC", L"Текущее время:", WS_CHILD | WS_VISIBLE, 140, 305, 300, 20, hwnd, (HMENU)IDC_TIMELABEL, hInst, NULL);
+            hTimeLabel = CreateWindowExW(0, L"STATIC", L"Текущее время:", WS_CHILD | WS_VISIBLE, 140, 300, 300, 20, hwnd, (HMENU)IDC_TIMELABEL, hInst, NULL);
+            hCurVolLabel = CreateWindowExW(0, L"STATIC", L"Текущая громкость: --%", WS_CHILD | WS_VISIBLE, 140, 320, 300, 20, hwnd, (HMENU)IDC_CURVOL, hInst, NULL);
 
             HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
             EnumChildWindows(hwnd, EnumChildProc, (LPARAM)hFont);
@@ -399,7 +494,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             return 0;
         case WM_TIMER:
             UpdateClock();
-            CheckSchedule();
+            ApplyCurrentSchedule(false);
             return 0;
         case WM_CLOSE:
             SendMessage(hwnd, WM_COMMAND, IDC_HIDE, 0);
@@ -412,6 +507,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR pCmdLine, int nCmdShow) {
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, L"VolumeXPMutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(NULL, L"Программа уже запущена!", L"Ошибка", MB_ICONERROR);
+        return 0;
+    }
+
     hInst = hInstance;
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
@@ -429,12 +530,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR pCmdLine, int nCmdShow)
     hWndMain = CreateWindowExW(
         0, CLASS_NAME, L"Управление громкостью",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        CW_USEDEFAULT, CW_USEDEFAULT, 450, 360,
+        CW_USEDEFAULT, CW_USEDEFAULT, 460, 390,
         NULL, NULL, hInstance, NULL
     );
 
     if (hWndMain == NULL) return 0;
     
+    // Применяем расписание при старте программы
+    SendMessage(hWndMain, WM_COMMAND, IDC_FORCERUN, 0);
+
     wchar_t iniP[MAX_PATH];
     GetModuleFileNameW(NULL, iniP, MAX_PATH);
     wchar_t* ptr = wcsrchr(iniP, L'\\');
@@ -452,5 +556,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR pCmdLine, int nCmdShow)
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    ReleaseMutex(hMutex);
+    CloseHandle(hMutex);
     return 0;
 }
