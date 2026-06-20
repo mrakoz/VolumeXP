@@ -94,7 +94,7 @@ int GetSysVolume() {
                 mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
                 mcd.paDetails = &mcdu;
                 if (mixerGetControlDetailsW((HMIXEROBJ)hMixer, &mcd, MIXER_GETCONTROLDETAILSF_VALUE) == MMSYSERR_NOERROR) {
-                    vol = (int)((mcdu.dwValue * 100) / 65535);
+                    vol = (int)((mcdu.dwValue * 100.0) / 65535.0 + 0.5);
                 }
             }
         }
@@ -129,7 +129,7 @@ void SetSysVolume(int vol) {
                 mcd.cMultipleItems = 0;
                 mcd.cbDetails = sizeof(MIXERCONTROLDETAILS_UNSIGNED);
                 mcd.paDetails = &mcdu;
-                mcdu.dwValue = (DWORD)((vol * 65535) / 100);
+                mcdu.dwValue = (DWORD)((vol * 65535.0) / 100.0 + 0.5);
                 mixerSetControlDetails((HMIXEROBJ)hMixer, &mcd, MIXER_SETCONTROLDETAILSF_VALUE);
             }
         }
