@@ -168,7 +168,16 @@ void ApplyCurrentSchedule(bool force) {
 
         if (dayMatch) {
             if (force) {
-                if (wcscmp(currentTime, sFrom) >= 0 && (wcscmp(sTo, L"--:--") == 0 || wcscmp(currentTime, sTo) < 0)) {
+                bool active = false;
+                if (wcscmp(sTo, L"--:--") == 0) {
+                    active = (wcscmp(currentTime, sFrom) >= 0);
+                } else if (wcscmp(sFrom, sTo) > 0) {
+                    active = (wcscmp(currentTime, sFrom) >= 0 || wcscmp(currentTime, sTo) < 0);
+                } else {
+                    active = (wcscmp(currentTime, sFrom) >= 0 && wcscmp(currentTime, sTo) < 0);
+                }
+                
+                if (active) {
                     targetVol = _wtoi(sVol);
                     wcscpy(scheduleDays, sDays);
                     break;
@@ -453,11 +462,18 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             SendMessage(hStartMinimized, BM_SETCHECK, minVal ? BST_CHECKED : BST_UNCHECKED, 0);
 
             HKEY hKey;
-            if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_READ | KEY_WRITE, &hKey) == ERROR_SUCCESS) {
                 wchar_t val[MAX_PATH];
                 DWORD size = sizeof(val);
                 if (RegQueryValueExW(hKey, L"VolumeSchedule", NULL, NULL, (LPBYTE)val, &size) == ERROR_SUCCESS) {
-                    SendMessage(hAutoStart, BM_SETCHECK, BST_CHECKED, 0);
+                    wchar_t exePath[MAX_PATH];
+                    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+                    if (wcscmp(val, exePath) == 0) {
+                        SendMessage(hAutoStart, BM_SETCHECK, BST_CHECKED, 0);
+                    } else {
+                        RegSetValueExW(hKey, L"VolumeSchedule", 0, REG_SZ, (LPBYTE)exePath, (wcslen(exePath) + 1) * sizeof(wchar_t));
+                        SendMessage(hAutoStart, BM_SETCHECK, BST_CHECKED, 0);
+                    }
                 } else {
                     SendMessage(hAutoStart, BM_SETCHECK, BST_UNCHECKED, 0);
                 }
